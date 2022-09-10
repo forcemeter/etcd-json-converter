@@ -2,13 +2,13 @@
 
 #### 备份，只需要单节点执行
 ```shell
-etcd-tool export \
+etcd-json-converter export \
 --endpoint=10.10.0.3:2379,10.10.0.4:2379,10.10.0.5:2379 \
 --file=/tmp/output.json
 ```
 
 ```shell
-etcd-tool export \
+etcd-json-converter export \
 --endpoint=10.10.0.3:2379,10.10.0.4:2379,10.10.0.5:2379 \
 --limit=0 --prefix=/your/prefix \
 --file=/tmp/output.json
@@ -16,7 +16,7 @@ etcd-tool export \
 
 #### 还原，只需要单节点执行
 ```shell
-etcd-tool import \
+etcd-json-converter import \
 --endpoint=10.10.0.3:2379,10.10.0.4:2379,10.10.0.5:2379 \
 --file=/tmp/input.json
 ```
