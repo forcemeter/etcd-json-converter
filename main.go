@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
+	"time"
+
 	"github.com/gogf/gf/v2/encoding/gjson"
 	"github.com/gogf/gf/v2/frame/g"
 	"github.com/gogf/gf/v2/os/gcmd"
@@ -10,191 +13,211 @@ import (
 	"github.com/gogf/gf/v2/os/gfile"
 	"github.com/gogf/gf/v2/os/glog"
 	"github.com/gogf/gf/v2/text/gstr"
-	"go.etcd.io/etcd/client/v3"
-	"os"
-	"strings"
-	"time"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-var (
-	methodImport  = "import"
-	methodExport  = "export"
-	methodDefault = ""
-
-	argEndpoint = []gcmd.Argument{
-		gcmd.Argument{
-			Name:   `endpoint`,
-			Short:  `i`,
-			Brief:  `ip:port,ip:port,ip:port`,
-			Orphan: false,
-		},
-		gcmd.Argument{
-			Name:   `file`,
-			Short:  `f`,
-			Brief:  `/tmp/load.json`,
-			Orphan: true,
-		},
-		gcmd.Argument{
-			Name:   `prefix`,
-			Short:  `p`,
-			Brief:  `export key prefix, must start with /, default /`,
-			Orphan: true,
-		},
-		gcmd.Argument{
-			Name:   `limit`,
-			Short:  `l`,
-			Brief:  `export file limit, default all`,
-			Orphan: true,
-		},
-	}
-	Main = &gcmd.Command{
-		Name:        "etcd json converter",
-		Brief:       "ETCD 简单导出导入工具",
-		Description: "ETCD 简单导出导入工具",
-	}
-	ExportMethod = &gcmd.Command{
-		Name:        methodExport,
-		Brief:       "ETCD 导出数据",
-		Description: "export data from etcd cluster and save as json file",
-		Arguments:   argEndpoint,
-		Func: func(ctx context.Context, parser *gcmd.Parser) (err error) {
-			methodDefault = methodExport
-			run(ctx, parser)
-			return
-		},
-	}
-	ImportMethod = &gcmd.Command{
-		Name:        methodImport,
-		Brief:       "ETCD 导入数据",
-		Description: "import json to etcd cluster",
-		Arguments:   argEndpoint,
-		Func: func(ctx context.Context, parser *gcmd.Parser) (err error) {
-			methodDefault = methodImport
-			run(ctx, parser)
-			return
-		},
-	}
-	StatusMethod = &gcmd.Command{
-		Name:        "status",
-		Brief:       "ETCD 集群状态",
-		Description: "show etcd cluster information",
-		Arguments:   argEndpoint,
-		Func: func(ctx context.Context, parser *gcmd.Parser) (err error) {
-			methodDefault = "status"
-			run(ctx, parser)
-			return
-		},
-	}
+const (
+	defaultDialTimeout = 5 * time.Second
+	defaultFile        = "load.json"
+	defaultPrefix      = "/"
 )
 
-var (
-	config clientv3.Config
-	client *clientv3.Client
-	err    error
-)
-
-func main() {
-	err := Main.AddCommand(ExportMethod, ImportMethod, StatusMethod)
-	if err != nil {
-		panic(err)
-	}
-	Main.Run(gctx.New())
+var commonArgs = []gcmd.Argument{
+	{
+		Name:   "endpoint",
+		Short:  "e",
+		Brief:  "etcd endpoints (e.g., ip:port,ip:port)",
+		Orphan: false,
+	},
+	{
+		Name:   "file",
+		Short:  "f",
+		Brief:  "json file path (default: load.json)",
+		Orphan: true,
+	},
+	{
+		Name:   "prefix",
+		Short:  "p",
+		Brief:  "key prefix for export, must start with / (default: /)",
+		Orphan: true,
+	},
+	{
+		Name:   "limit",
+		Short:  "l",
+		Brief:  "limit number of keys to export (default: all)",
+		Orphan: true,
+	},
 }
 
-func run(ctx context.Context, parser *gcmd.Parser) {
-	endpoint := parser.GetOpt("endpoint").String()
+func main() {
+	mainCmd := &gcmd.Command{
+		Name:        "etcd-json-converter",
+		Brief:       "ETCD Simple Export/Import Tool",
+		Description: "A simple tool to export/import data between ETCD and JSON files",
+	}
+
+	exportCmd := &gcmd.Command{
+		Name:        "export",
+		Brief:       "Export data from ETCD to JSON file",
+		Description: "Export data from etcd cluster and save as JSON file",
+		Arguments:   commonArgs,
+		Func:        runExport,
+	}
+
+	importCmd := &gcmd.Command{
+		Name:        "import",
+		Brief:       "Import data from JSON file to ETCD",
+		Description: "Import JSON data to etcd cluster",
+		Arguments:   commonArgs,
+		Func:        runImport,
+	}
+
+	statusCmd := &gcmd.Command{
+		Name:        "status",
+		Brief:       "Show ETCD cluster status",
+		Description: "Display etcd cluster information",
+		Arguments:   commonArgs,
+		Func:        runStatus,
+	}
+
+	if err := mainCmd.AddCommand(exportCmd, importCmd, statusCmd); err != nil {
+		panic(err)
+	}
+	mainCmd.Run(gctx.New())
+}
+
+func newClient(ctx context.Context, endpoint string) (*clientv3.Client, error) {
 	if g.IsEmpty(endpoint) {
-		glog.Info(ctx, "--endpoint 参数不能为空")
-		os.Exit(0)
+		return nil, errors.New("--endpoint is required")
 	}
-
-	file := parser.GetOpt("file").String()
-	if g.IsEmpty(file) {
-		file = "load.json"
-	}
-
-	limit := parser.GetOpt("limit").Int64()
-	prefix := parser.GetOpt("prefix").String()
 
 	endpoints := gstr.Explode(",", endpoint)
-	glog.Info(ctx, endpoints)
-	config = clientv3.Config{
-		Endpoints:   endpoints,
-		DialTimeout: 5 * time.Second,
-	}
+	glog.Infof(ctx, "connecting to endpoints: %v", endpoints)
 
-	if client, err = clientv3.New(config); err != nil {
-		glog.Panic(ctx, err)
+	return clientv3.New(clientv3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: defaultDialTimeout,
+	})
+}
+
+func runExport(ctx context.Context, parser *gcmd.Parser) error {
+	client, err := newClient(ctx, parser.GetOpt("endpoint").String())
+	if err != nil {
+		glog.Error(ctx, err)
+		return err
 	}
 	defer client.Close()
 
-	switch methodDefault {
-	case methodExport:
-		if err := Export(ctx, prefix, limit, file); err != nil {
-			glog.Error(ctx, err)
-		}
-	case methodImport:
-		if err := Import(ctx, file); err != nil {
-			glog.Error(ctx, err)
-		}
-	default:
-		Status(ctx)
-	}
-}
-
-func Import(ctx context.Context, file string) error {
-	if !gfile.IsFile(file) {
-		return errors.New("文件不存在:" + file)
+	file := parser.GetOpt("file").String()
+	if g.IsEmpty(file) {
+		glog.Info(ctx, "use default file:", defaultFile)
+		file = defaultFile
 	}
 
-	data := map[string]string{}
-	err := gjson.DecodeTo(gfile.GetContents(file), &data)
-	if err != nil {
-		glog.Fatal(ctx, err)
-	}
-	for k, v := range data {
-		glog.Info(ctx, k)
-		r, err := client.Put(ctx, k, v)
-		if err != nil {
-			glog.Error(ctx, "写入失败")
-			return err
-		} else {
-			glog.Info(ctx, k, r.Header.String())
-		}
+	// Replace "time" placeholder with current datetime
+	if strings.Contains(file, "-time") {
+		file = strings.ReplaceAll(file, "-time", time.Now().Format("-20060102-150405"))
+		glog.Info(ctx, "use time format file:", file)
 	}
 
-	return nil
-}
-
-func Export(ctx context.Context, prefix string, limit int64, file string) error {
+	prefix := parser.GetOpt("prefix").String()
 	if g.IsEmpty(prefix) || !gstr.HasPrefix(prefix, "/") {
-		prefix = "/"
+		prefix = defaultPrefix
 	}
 
+	limit := parser.GetOpt("limit").Int64()
 	if limit < 0 {
 		limit = 0
 	}
 
-	glog.Infof(ctx, "export %d rows with prefix %s", limit, prefix)
+	return exportData(ctx, client, prefix, limit, file)
+}
 
-	response, err := client.Get(ctx, prefix, clientv3.WithPrefix(), clientv3.WithLimit(limit))
+func runImport(ctx context.Context, parser *gcmd.Parser) error {
+	client, err := newClient(ctx, parser.GetOpt("endpoint").String())
+	if err != nil {
+		glog.Error(ctx, err)
+		return err
+	}
+	defer client.Close()
+
+	file := parser.GetOpt("file").String()
+	if g.IsEmpty(file) {
+		glog.Info(ctx, "use default file:", defaultFile)
+		file = defaultFile
+	}
+
+	return importData(ctx, client, file)
+}
+
+func runStatus(ctx context.Context, parser *gcmd.Parser) error {
+	endpoint := parser.GetOpt("endpoint").String()
+	client, err := newClient(ctx, endpoint)
+	if err != nil {
+		glog.Error(ctx, err)
+		return err
+	}
+	defer client.Close()
+
+	status, err := client.Status(ctx, strings.Split(endpoint, ",")[0])
+	if err != nil {
+		glog.Errorf(ctx, "failed to get status: %v", err)
+		return err
+	}
+
+	glog.Infof(ctx, "cluster status: %+v", status)
+	return nil
+}
+
+func importData(ctx context.Context, client *clientv3.Client, file string) error {
+	if !gfile.IsFile(file) {
+		return errors.New("file not found: " + file)
+	}
+
+	content := gfile.GetContents(file)
+	data := make(map[string]string)
+	if err := gjson.DecodeTo(content, &data); err != nil {
+		return err
+	}
+
+	glog.Infof(ctx, "importing %d keys from %s", len(data), file)
+
+	for key, value := range data {
+		resp, err := client.Put(ctx, key, value)
+		if err != nil {
+			glog.Errorf(ctx, "failed to write key %s: %v", key, err)
+			return err
+		}
+		glog.Infof(ctx, "imported: %s (revision: %d)", key, resp.Header.Revision)
+	}
+
+	glog.Infof(ctx, "successfully imported %d keys", len(data))
+	return nil
+}
+
+func exportData(ctx context.Context, client *clientv3.Client, prefix string, limit int64, file string) error {
+	glog.Infof(ctx, "exporting keys with prefix '%s' (limit: %d)", prefix, limit)
+
+	opts := []clientv3.OpOption{clientv3.WithPrefix()}
+	if limit > 0 {
+		opts = append(opts, clientv3.WithLimit(limit))
+	}
+
+	response, err := client.Get(ctx, prefix, opts...)
 	if err != nil {
 		return err
 	}
 
-	data := map[string]string{}
+	data := make(map[string]string, len(response.Kvs))
 	for _, kv := range response.Kvs {
 		data[string(kv.Key)] = string(kv.Value)
 	}
 
-	gfile.PutContents(file, gjson.MustEncodeString(data))
-	glog.Infof(ctx, "已保存到 %s", gfile.RealPath(file))
-	glog.Infof(ctx, "共导出数据 %d 条", len(data))
+	if err := gfile.PutContents(file, gjson.MustEncodeString(data)); err != nil {
+		return err
+	}
 
+	glog.Infof(ctx, "saved to %s", gfile.RealPath(file))
+	glog.Infof(ctx, "exported %d keys", len(data))
 	return nil
-}
-
-func Status(ctx context.Context) {
-	sts, err := client.Status(ctx, strings.Join(config.Endpoints, ","))
-	glog.Info(ctx, sts, err)
 }

@@ -1,0 +1,27 @@
+# Build artifacts
+etcd-replace
+etcd-json-converter
+
+# Data files
+*.json
+data/
+
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.swp
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Scripts
+*.sh
+
+# Documentation
+*.md
